@@ -1,0 +1,22 @@
+# --- MCP & Agent Core ---
+mcp>=1.0.0,<2.0.0
+langgraph>=0.0.30
+langchain-core>=0.1.30
+
+# --- MCP Tool Dependencies ---
+requests>=2.31.0
+python-dotenv>=1.0.0
+PyGithub>=2.1.1
+slack-sdk>=3.27.0
+prometheus-api-client>=0.5.3
+kubernetes>=28.1.0
+
+# --- Anomaly Detection & ML ---
+scikit-learn>=1.3.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# --- API Backend & Database ---
+fastapi>=0.109.0
+uvicorn>=0.27.0
+psycopg2-binary>=2.9.9
