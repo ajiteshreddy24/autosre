@@ -1,0 +1,1040 @@
+
+
+=== FILE: .\agent\graph.py ===
+
+
+
+=== FILE: .\agent\state.py ===
+
+
+
+=== FILE: .\agent\__init__.py ===
+
+
+
+=== FILE: .\agent\nodes\__init__.py ===
+
+
+
+=== FILE: .\agent\tools\github_mcp.py ===
+
+import os
+import requests
+from dotenv import load_dotenv
+from github import Github, GithubException, Auth
+from mcp.server.fastmcp import FastMCP
+import warnings
+
+warnings.filterwarnings("ignore", module="pydantic_settings")
+
+
+load_dotenv()
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "ajiteshreddy24/microservices-demo")
+
+mcp = FastMCP("GitHub-MCP-Server")
+
+@mcp.tool()
+def get_recent_deploys(service_name: str, limit: int = 5) -> dict:
+    """
+    Fetch recent commit and deployment history for a microservice from GitHub.
+    Used by the agent to correlate anomalies with recent code deployments.
+    
+    Args:
+        service_name: Name of the microservice (e.g., 'paymentservice')
+        limit: Max number of recent commits to retrieve (default: 5)
+        
+    Returns:
+        dict containing commit hash, author, timestamp, message, and URL.
+    """
+    try:
+        commits_data = []
+        
+        # Method 1: Use PyGithub SDK if GITHUB_TOKEN is present
+        if GITHUB_TOKEN:
+            g = Github(auth=Auth.Token(GITHUB_TOKEN))
+            repo = g.get_repo(GITHUB_REPO)
+            
+            # Fetch recent commits from repo
+            commits = repo.get_commits()[:limit]
+            
+            for commit in commits:
+                commits_data.append({
+                    "sha": commit.sha[:7],
+                    "full_sha": commit.sha,
+                    "author": commit.commit.author.name,
+                    "date": commit.commit.author.date.isoformat(),
+                    "message": commit.commit.message.split("\n")[0],  # First line only
+                    "url": commit.html_url
+                })
+        else:
+            # Method 2: Public GitHub REST API fallback (unauthenticated)
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/commits?per_page={limit}"
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            raw_commits = response.json()
+            for item in raw_commits:
+                commits_data.append({
+                    "sha": item["sha"][:7],
+                    "full_sha": item["sha"],
+                    "author": item["commit"]["author"]["name"],
+                    "date": item["commit"]["author"]["date"],
+                    "message": item["commit"]["message"].split("\n")[0],
+                    "url": item["html_url"]
+                })
+                
+        return {
+            "status": "success",
+            "repo": GITHUB_REPO,
+            "service": service_name,
+            "count": len(commits_data),
+            "commits": commits_data
+        }
+        
+    except GithubException as e:
+        return {
+            "status": "error",
+            "service": service_name,
+            "error": f"GitHub API SDK error: {e.data.get('message', str(e))}",
+            "commits": []
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "service": service_name,
+            "error": f"Failed to fetch GitHub commits: {str(e)}",
+            "commits": []
+        }
+
+if __name__ == "__main__":
+    print("Testing GitHub MCP tool locally...")
+    test_result = get_recent_deploys(service_name="paymentservice", limit=3)
+    print(f"Status: {test_result['status']}")
+    if test_result['status'] == "error":
+        print(f"Error: {test_result.get('error')}")
+    else:
+        print(f"Commits fetched: {test_result.get('count', 0)}")
+        if test_result.get('commits'):
+            c = test_result['commits'][0]
+            print(f"Latest commit: [{c['sha']}] '{c['message']}' by {c['author']}")
+
+
+=== FILE: .\agent\tools\kubernetes_mcp.py ===
+
+import os
+import subprocess
+from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def restart_pod(service_name: str) -> dict:
+    """
+    Restart a Kubernetes pod by deleting it.
+    Kubernetes automatically recreates it.
+    
+    This is the agent's first response to most failures —
+    if a pod is misbehaving, restart it and see if it recovers.
+    """
+    try:
+        # Get the pod name first
+        get_pod = subprocess.run(
+            ["kubectl", "get", "pods", "-l", 
+             f"app={service_name}",
+             "-o", "jsonpath={.items[0].metadata.name}"],
+            capture_output=True, text=True
+        )
+        
+        pod_name = get_pod.stdout.strip()
+        
+        if not pod_name:
+            return {
+                "success": False,
+                "error": f"No pod found for service {service_name}",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Delete the pod — K8s recreates it automatically
+        result = subprocess.run(
+            ["kubectl", "delete", "pod", pod_name],
+            capture_output=True, text=True
+        )
+        
+        return {
+            "success": True,
+            "service": service_name,
+            "pod_deleted": pod_name,
+            "action": "restart",
+            "message": f"Pod {pod_name} deleted, Kubernetes will recreate it",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+def scale_deployment(service_name: str, replicas: int) -> dict:
+    """
+    Scale a deployment up or down.
+    
+    Agent uses this when:
+    - DB connection exhaustion → scale down to reduce connections
+    - High traffic causing failures → scale up to handle load
+    """
+    try:
+        result = subprocess.run(
+            ["kubectl", "scale", "deployment", service_name,
+             f"--replicas={replicas}"],
+            capture_output=True, text=True
+        )
+        
+        return {
+            "success": True,
+            "service": service_name,
+            "action": "scale",
+            "replicas": replicas,
+            "message": f"Scaled {service_name} to {replicas} replicas",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+def rollback_deployment(service_name: str) -> dict:
+    """
+    Rollback a deployment to its previous version.
+    
+    Agent uses this when:
+    - Error rate spiked right after a deployment
+    - GitHub shows recent deploy matches anomaly timestamp
+    - Root cause = bad deployment
+    
+    This is a HIGH RISK action — requires human approval first.
+    """
+    try:
+        result = subprocess.run(
+            ["kubectl", "rollout", "undo", 
+             f"deployment/{service_name}"],
+            capture_output=True, text=True
+        )
+        
+        return {
+            "success": True,
+            "service": service_name,
+            "action": "rollback",
+            "message": f"Rolled back {service_name} to previous version",
+            "output": result.stdout,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+# Test it directly
+if __name__ == "__main__":
+    print("Testing Kubernetes MCP...")
+    
+    # Test scale (safe to test)
+    result = scale_deployment("frontend", 2)
+    print("Scale result:", result)
+    
+    # Scale back to 1
+    result = scale_deployment("frontend", 1)
+    print("Scale back result:", result)
+
+=== FILE: .\agent\tools\loki_mcp.py ===
+
+import os
+import time
+import requests
+from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+import warnings
+
+warnings.filterwarnings("ignore", module="pydantic_settings")
+
+# Load environment variables from .env
+load_dotenv()
+
+LOKI_URL = os.getenv("LOKI_URL", "http://localhost:3100")
+
+# Initialize the MCP Server instance
+mcp = FastMCP("Loki-MCP-Server")
+
+@mcp.tool()
+def get_logs(service_name: str, time_range_minutes: int = 15, level: str = "ERROR") -> dict:
+    """
+    Fetch recent log lines for a specific microservice from Loki filtered by severity level.
+    
+    Args:
+        service_name: Name of the microservice (e.g., 'frontend', 'cartservice', 'paymentservice')
+        time_range_minutes: How many minutes back to query (default: 15)
+        level: Severity level filter string (e.g., 'ERROR', 'WARN', 'INFO')
+        
+    Returns:
+        dict containing query status, total log count, and formatted log lines.
+    """
+    try:
+        # 1. Convert minutes back into nanosecond epoch timestamps (Loki requirement)
+        now_sec = time.time()
+        end_time_ns = int(now_sec * 1e9)
+        start_time_ns = int((now_sec - (time_range_minutes * 60)) * 1e9)
+        
+        # 2. Build LogQL query: selects log stream by app label and filters for text string match
+        # Example LogQL generated: {app="cartservice"} |= "ERROR"
+        logql_query = f'{{app="{service_name}"}} |= "{level}"'
+        
+        endpoint = f"{LOKI_URL.rstrip('/')}/loki/api/v1/query_range"
+        params = {
+            "query": logql_query,
+            "start": start_time_ns,
+            "end": end_time_ns,
+            "limit": 100,
+            "direction": "BACKWARD"  # Fetch newest logs first
+        }
+        
+        # 3. Query Loki REST API
+        response = requests.get(endpoint, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        log_lines = []
+        
+        # 4. Extract log lines from streams response structure
+        results = data.get("data", {}).get("result", [])
+        for stream in results:
+            # stream['values'] is a list of [timestamp_str_ns, log_message_str]
+            for ts, line in stream.get("values", []):
+                log_lines.append({
+                    "timestamp_ns": ts,
+                    "message": line.strip()
+                })
+                
+        return {
+            "status": "success",
+            "service": service_name,
+            "query": logql_query,
+            "count": len(log_lines),
+            "logs": log_lines
+        }
+        
+    except requests.exceptions.RequestException as e:
+        return {
+            "status": "error",
+            "service": service_name,
+            "error": f"Failed to connect to Loki at {LOKI_URL}: {str(e)}",
+            "logs": []
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "service": service_name,
+            "error": f"Unexpected error querying Loki: {str(e)}",
+            "logs": []
+        }
+
+if __name__ == "__main__":
+    print("Testing Loki MCP tool locally...")
+    test_result = get_logs(service_name="cartservice", time_range_minutes=30, level="ERROR")
+    print(f"Status: {test_result['status']}")
+    print(f"Logs fetched: {test_result['count']}")
+    if test_result['logs']:
+        print(f"Sample log: {test_result['logs'][0]['message']}")
+
+=== FILE: .\agent\tools\prometheus_mcp.py ===
+
+import os
+import requests
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
+
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
+
+def query_prometheus(promql: str) -> float:
+    """
+    Send a PromQL query to Prometheus and return the value.
+    PromQL is the query language Prometheus uses.
+    Example: 'rate(http_requests_total[5m])' means
+    'give me the per-second rate of HTTP requests over 5 minutes'
+    """
+    try:
+        response = requests.get(
+            f"{PROMETHEUS_URL}/api/v1/query",
+            params={"query": promql},
+            timeout=10
+        )
+        data = response.json()
+        
+        # Prometheus returns results in this format:
+        # {"data": {"result": [{"value": [timestamp, "value"]}]}}
+        results = data.get("data", {}).get("result", [])
+        if results:
+            return float(results[0]["value"][1])
+        return 0.0
+    except Exception as e:
+        print(f"Prometheus query failed: {e}")
+        return 0.0
+
+
+def get_metrics(service_name: str, time_range_minutes: int = 5) -> dict:
+    """
+    Get health metrics for a specific service.
+    
+    This is the tool the agent calls when it detects an anomaly.
+    It queries Prometheus for 4 key metrics that tell us
+    how healthy a service is right now.
+    
+    Args:
+        service_name: Name of the Kubernetes service (e.g. "paymentservice")
+        time_range_minutes: How far back to look (default: 5 minutes)
+    
+    Returns:
+        dict with error_rate, latency, cpu, memory metrics
+    """
+    time_range = f"{time_range_minutes}m"
+    
+    # Error rate: what % of requests are failing?
+    # If this spikes → something is broken
+    error_rate = query_prometheus(
+        f'rate(http_requests_total{{job="{service_name}",status=~"5.."}}[{time_range}])'
+    )
+    
+    # Total request rate: how many requests per second?
+    total_rate = query_prometheus(
+        f'rate(http_requests_total{{job="{service_name}"}}[{time_range}])'
+    )
+    
+    # Error percentage: error_rate / total_rate * 100
+    error_percentage = (error_rate / total_rate * 100) if total_rate > 0 else 0.0
+    
+    # CPU usage: how much CPU is the service using?
+    cpu_usage = query_prometheus(
+        f'rate(container_cpu_usage_seconds_total{{pod=~"{service_name}.*"}}[{time_range}])'
+    )
+    
+    # Memory usage in MB
+    memory_usage = query_prometheus(
+        f'container_memory_usage_bytes{{pod=~"{service_name}.*"}}'
+    ) / (1024 * 1024)  # Convert bytes to MB
+    
+    return {
+        "service": service_name,
+        "time_range_minutes": time_range_minutes,
+        "error_rate_percent": round(error_percentage, 2),
+        "total_requests_per_sec": round(total_rate, 2),
+        "cpu_usage_cores": round(cpu_usage, 4),
+        "memory_usage_mb": round(memory_usage, 2),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+# Test it directly
+if __name__ == "__main__":
+    print("Testing Prometheus MCP...")
+    result = get_metrics("frontend", 5)
+    print(result)
+
+=== FILE: .\agent\tools\slack_mcp.py ===
+
+import os
+import requests
+from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+import warnings
+
+warnings.filterwarnings("ignore", module="pydantic_settings")
+
+
+load_dotenv()
+
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+
+mcp = FastMCP("Slack-MCP-Server")
+
+@mcp.tool()
+def send_alert(channel: str = "#alerts", message: str = "", severity: str = "HIGH") -> dict:
+    """
+    Send an automated incident alert notification to Slack via Webhook.
+    
+    Args:
+        channel: Slack channel name (e.g., '#alerts')
+        message: Notification message containing anomaly details or RCA summary
+        severity: Incident severity level ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')
+        
+    Returns:
+        dict indicating notification delivery status.
+    """
+    try:
+        if not SLACK_WEBHOOK_URL:
+            return {
+                "status": "warning",
+                "message": "SLACK_WEBHOOK_URL not configured in .env. Alert logged locally.",
+                "details": f"[{severity}] {message}"
+            }
+            
+        color_map = {
+            "CRITICAL": "#FF0000", # Red
+            "HIGH": "#FFA500",     # Orange
+            "MEDIUM": "#FFFF00",   # Yellow
+            "LOW": "#00FF00"       # Green
+        }
+        
+        # Slack Block Kit payload structure
+        payload = {
+            "text": f"🚨 *AutoSRE Incident Alert* [{severity}]",
+            "attachments": [
+                {
+                    "color": color_map.get(severity, "#FFA500"),
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*Severity:* `{severity}` | *Channel:* `{channel}`\n\n*Incident Summary:*\n{message}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        return {
+            "status": "success",
+            "channel": channel,
+            "severity": severity,
+            "message_sent": True
+        }
+        
+    except requests.exceptions.RequestException as e:
+        return {
+            "status": "error",
+            "error": f"Failed to deliver Slack webhook: {str(e)}",
+            "message_sent": False
+        }
+
+@mcp.tool()
+def request_approval(action: str, service: str, risk_level: str = "HIGH") -> dict:
+    """
+    Request Human-in-the-Loop (HITL) approval before executing a high-risk action.
+    Pauses the LangGraph state machine execution pending engineer verification.
+    
+    Args:
+        action: Proposed remediation action (e.g., 'rollback_deployment', 'restart_pod')
+        service: Target microservice name (e.g., 'paymentservice')
+        risk_level: Action risk classification ('MEDIUM', 'HIGH', 'CRITICAL')
+        
+    Returns:
+        dict containing approval status and human gate flag.
+    """
+    try:
+        approval_prompt = (
+            f"⚠️ *HUMAN APPROVAL REQUIRED*\n"
+            f"The AutoSRE Agent has proposed a high-risk remediation:\n"
+            f"• *Target Service:* `{service}`\n"
+            f"• *Proposed Action:* `{action}`\n"
+            f"• *Risk Classification:* `{risk_level}`\n\n"
+            f"Please approve or reject this action in the React Dashboard or Slack."
+        )
+        
+        # Deliver notification to Slack
+        slack_result = send_alert(channel="#sre-approvals", message=approval_prompt, severity=risk_level)
+        
+        # Return state metadata to pause LangGraph execution
+        return {
+            "status": "pending_approval",
+            "action": action,
+            "service": service,
+            "risk_level": risk_level,
+            "slack_notified": slack_result.get("status") == "success",
+            "requires_human_gate": True
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": f"Failed to request HITL approval: {str(e)}",
+            "requires_human_gate": True
+        }
+
+if __name__ == "__main__":
+    print("Testing Slack MCP tools locally...")
+    alert_res = send_alert(channel="#alerts", message="Test alert from AutoSRE agent local execution.", severity="HIGH")
+    print(f"Send Alert Status: {alert_res['status']}")
+    if alert_res.get("error"):
+        print(f"Alert Error: {alert_res['error']}")
+    elif alert_res.get("message"):
+        print(f"Alert Info: {alert_res['message']}")
+        
+    approval_res = request_approval(action="rollback_deployment", service="paymentservice", risk_level="HIGH")
+    print(f"Approval Request Status: {approval_res['status']}")
+    if approval_res.get("error"):
+        print(f"Approval Error: {approval_res['error']}")
+
+
+=== FILE: .\agent\tools\__init__.py ===
+
+
+
+=== FILE: .\anomaly\baseline_stats.json ===
+
+{
+  "frontend_cpu": {
+    "mean": 0.0013203880455675136,
+    "std": 0.0031203750805140168
+  },
+  "frontend_memory": {
+    "mean": 4896419.58506224,
+    "std": 5132970.965188448
+  },
+  "frontend_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "cartservice_cpu": {
+    "mean": 0.0023988224210068497,
+    "std": 0.004860431110880626
+  },
+  "cartservice_memory": {
+    "mean": 32031331.850622408,
+    "std": 34174758.008482896
+  },
+  "cartservice_restarts": {
+    "mean": 0.6307053941908713,
+    "std": 0.899381222663179
+  },
+  "paymentservice_cpu": {
+    "mean": 0.00023754026231912828,
+    "std": 0.0002995344986015989
+  },
+  "paymentservice_memory": {
+    "mean": 14370586.556016598,
+    "std": 14905566.693934169
+  },
+  "paymentservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "checkoutservice_cpu": {
+    "mean": 0.00016973226187981497,
+    "std": 0.00025834280213439124
+  },
+  "checkoutservice_memory": {
+    "mean": 3358821.9751037345,
+    "std": 3605187.0904086907
+  },
+  "checkoutservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "shippingservice_cpu": {
+    "mean": 0.00021319407081253484,
+    "std": 0.0002768017915120717
+  },
+  "shippingservice_memory": {
+    "mean": 2985287.1701244814,
+    "std": 3216472.7283261255
+  },
+  "shippingservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "emailservice_cpu": {
+    "mean": 0.001124520969824997,
+    "std": 0.0023449080522394143
+  },
+  "emailservice_memory": {
+    "mean": 20381050.15767635,
+    "std": 21142671.891188722
+  },
+  "emailservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "productcatalogservice_cpu": {
+    "mean": 0.0006962367738991747,
+    "std": 0.001543337469804257
+  },
+  "productcatalogservice_memory": {
+    "mean": 4914452.182572614,
+    "std": 5233331.2109027235
+  },
+  "productcatalogservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "recommendationservice_cpu": {
+    "mean": 0.001345982663309151,
+    "std": 0.0018854585836034447
+  },
+  "recommendationservice_memory": {
+    "mean": 16920236.08298755,
+    "std": 17349630.878554363
+  },
+  "recommendationservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "adservice_cpu": {
+    "mean": 0.001512209748434909,
+    "std": 0.002854392985020969
+  },
+  "adservice_memory": {
+    "mean": 46317635.98340249,
+    "std": 48115217.8616975
+  },
+  "adservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "currencyservice_cpu": {
+    "mean": 0.0012737677275693072,
+    "std": 0.0026212394915065447
+  },
+  "currencyservice_memory": {
+    "mean": 17312789.24481328,
+    "std": 18182372.1178026
+  },
+  "currencyservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "redis-cart_cpu": {
+    "mean": 0.0006585908524832854,
+    "std": 0.0007926557086739576
+  },
+  "redis-cart_memory": {
+    "mean": 4205980.149377594,
+    "std": 4480272.805753631
+  },
+  "redis-cart_restarts": {
+    "mean": 0.6514522821576764,
+    "std": 0.9502674880028184
+  }
+}
+
+=== FILE: .\anomaly\detector.py ===
+
+import os
+
+# Prevent OpenBLAS & multi-threading memory allocation crashes
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+import sys
+import time
+import requests
+import joblib
+import pandas as pd
+from datetime import datetime
+
+PROMETHEUS_URL = "http://localhost:9090/api/v1/query"
+
+SERVICES = [
+    "frontend",
+    "cartservice",
+    "paymentservice",
+    "checkoutservice",
+    "shippingservice",
+    "emailservice",
+    "productcatalogservice",
+    "recommendationservice",
+    "adservice",
+    "currencyservice",
+    "redis-cart"
+]
+
+def fetch_current_metric(query):
+    """Fetch a scalar value from Prometheus query endpoint."""
+    try:
+        response = requests.get(PROMETHEUS_URL, params={'query': query}, timeout=5)
+        data = response.json()
+        results = data.get('data', {}).get('result', [])
+        if results:
+            return float(results[0]['value'][1])
+        return 0.0
+    except Exception as e:
+        print(f"⚠️ Error querying Prometheus: {e}")
+        return 0.0
+
+def load_model_and_scaler():
+    """Load the trained Isolation Forest model and StandardScaler."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(script_dir, "isolation_forest.joblib")
+    scaler_path = os.path.join(script_dir, "scaler.joblib")
+
+    try:
+        model = joblib.load(model_path)
+        scaler = joblib.load(scaler_path)
+        print(f"✅ Loaded model and scaler from {script_dir}")
+        return model, scaler
+    except Exception as e:
+        print(f"❌ Failed to load model/scaler artifacts: {e}")
+        print("💡 Run 'python anomaly/train.py' first to generate artifact files.")
+        sys.exit(1)
+
+def main():
+    model, scaler = load_model_and_scaler()
+    print("🚀 Per-Service Anomaly Detector active! Polling Prometheus every 15s...\n")
+
+    while True:
+        live_metrics = {}
+
+        for svc in SERVICES:
+            live_metrics[f"{svc}_cpu"] = fetch_current_metric(
+                f'sum(rate(container_cpu_usage_seconds_total{{namespace="default", pod=~"{svc}.*", container!=""}}[2m])) or vector(0)'
+            )
+            live_metrics[f"{svc}_memory"] = fetch_current_metric(
+                f'sum(container_memory_working_set_bytes{{namespace="default", pod=~"{svc}.*", container!=""}}) or vector(0)'
+            )
+            live_metrics[f"{svc}_restarts"] = fetch_current_metric(
+                f'sum(changes(kube_pod_container_status_restarts_total{{namespace="default", pod=~"{svc}.*"}}[5m])) or vector(0)'
+            )
+
+        df_live = pd.DataFrame([live_metrics])
+
+        # Scale features using the fitted scaler
+        df_scaled = scaler.transform(df_live)
+
+        prediction = model.predict(df_scaled)[0]        # -1 = Anomaly, 1 = Normal
+        score = model.decision_function(df_scaled)[0]   # Lower score = higher anomaly chance
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+        if prediction == -1:
+            spiked_feature = max(live_metrics, key=live_metrics.get)
+            target_service = spiked_feature.split("_")[0].upper()
+            feature_value = live_metrics[spiked_feature]
+            
+            print(f"[{timestamp}] 🚨 ANOMALY DETECTED | Score: {score:.4f} | Target Service: {target_service} | Feature Spike: {spiked_feature} ({feature_value:.2f})")
+        else:
+            print(f"[{timestamp}] 🟢 NORMAL | Score: {score:.4f}")
+
+        time.sleep(15)
+
+if __name__ == "__main__":
+    main()
+
+=== FILE: .\anomaly\train.py ===
+
+import os
+
+# Limit OpenBLAS & multi-threading to prevent memory allocation crashes
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+import time
+import json
+import pandas as pd
+import requests
+import joblib
+from dotenv import load_dotenv
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
+
+load_dotenv()
+
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
+MODEL_PATH = "anomaly/isolation_forest.joblib"
+SCALER_PATH = "anomaly/scaler.joblib"
+STATS_PATH = "anomaly/baseline_stats.json"
+
+# Complete list of Online Boutique microservices
+SERVICES = [
+    "frontend",
+    "cartservice",
+    "paymentservice",
+    "checkoutservice",
+    "shippingservice",
+    "emailservice",
+    "productcatalogservice",
+    "recommendationservice",
+    "adservice",
+    "currencyservice",
+    "redis-cart"
+]
+
+def fetch_prometheus_range(query: str, start_time: int, end_time: int, step: str = "15s") -> list:
+    """Fetch time-series range vector from Prometheus API."""
+    url = f"{PROMETHEUS_URL.rstrip('/')}/api/v1/query_range"
+    params = {"query": query, "start": start_time, "end": end_time, "step": step}
+    try:
+        res = requests.get(url, params=params, timeout=10)
+        res.raise_for_status()
+        data = res.json().get("data", {}).get("result", [])
+        if data:
+            return data[0].get("values", [])
+        return []
+    except Exception as e:
+        print(f"⚠️ Error fetching range query '{query}': {e}")
+        return []
+
+def train_isolation_forest():
+    """Fetches baseline metrics per microservice and trains Isolation Forest."""
+    print("📥 Gathering 1 hour of per-service Prometheus baseline metrics...")
+    
+    end_time = int(time.time())
+    start_time = end_time - 3600  # 1 hour lookback
+    
+    dataset = {}
+
+    for svc in SERVICES:
+        queries = {
+            f"{svc}_cpu": f'sum(rate(container_cpu_usage_seconds_total{{namespace="default", pod=~"{svc}.*", container!=""}}[2m])) or vector(0)',
+            f"{svc}_memory": f'sum(container_memory_working_set_bytes{{namespace="default", pod=~"{svc}.*", container!=""}}) or vector(0)',
+            f"{svc}_restarts": f'sum(changes(kube_pod_container_status_restarts_total{{namespace="default", pod=~"{svc}.*"}}[5m])) or vector(0)'
+        }
+        
+        for feature_name, q in queries.items():
+            raw_values = fetch_prometheus_range(q, start_time, end_time)
+            dataset[feature_name] = [float(v[1]) for v in raw_values]
+
+    lengths = [len(v) for v in dataset.values() if len(v) > 0]
+    if not lengths:
+        print("❌ Error: Could not retrieve metrics from Prometheus. Check connection!")
+        return
+
+    min_length = min(lengths)
+    data_matrix = {k: v[:min_length] for k, v in dataset.items()}
+    df = pd.DataFrame(data_matrix)
+    print(f"✅ Baseline dataset created: {len(df)} samples across {len(df.columns)} per-service features.")
+
+    stats = {
+        col: {"mean": float(df[col].mean()), "std": float(df[col].std() or 1e-6)}
+        for col in df.columns
+    }
+
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(df)
+
+    model = IsolationForest(n_estimators=100, contamination=0.03, random_state=42)
+    model.fit(scaled_data)
+
+    os.makedirs("anomaly", exist_ok=True)
+    joblib.dump(model, MODEL_PATH)
+    joblib.dump(scaler, SCALER_PATH)
+    with open(STATS_PATH, "w") as f:
+        json.dump(stats, f, indent=2)
+
+    print(f"🎉 Saved per-service model to '{MODEL_PATH}', scaler, and '{STATS_PATH}'!")
+
+if __name__ == "__main__":
+    train_isolation_forest()
+
+=== FILE: .\chaos\0_restore_all.py ===
+
+import subprocess
+
+def restore_cluster():
+    print("🧼 Cleaning up all chaos injections and restoring cluster health...")
+    commands = [
+        "kubectl rollout undo deployment/paymentservice",
+        "kubectl set resources deployment/cartservice -c server --limits=memory=256Mi --requests=memory=64Mi",
+        "kubectl set resources deployment/shippingservice -c server --limits=cpu=200m --requests=cpu=100m",
+        "kubectl scale deployment/redis-cart --replicas=1",
+        "kubectl rollout status deployment/paymentservice",
+        "kubectl rollout status deployment/cartservice",
+        "kubectl rollout status deployment/shippingservice"
+    ]
+    for cmd in commands:
+        subprocess.run(cmd, shell=True, stderr=subprocess.DEVNULL)
+    print("🟢 Cluster restored to healthy baseline!")
+
+if __name__ == "__main__":
+    restore_cluster()
+
+=== FILE: .\chaos\1_bad_release.py ===
+
+import subprocess
+import time
+
+def inject_bad_release():
+    print("🔥 [CHAOS] Injecting Bad Release into paymentservice...")
+    # Point deployment to a bad docker image tag
+    cmd = "kubectl set image deployment/paymentservice server=gcr.io/google-samples/microservices-demo/paymentservice:v999.0.0"
+    subprocess.run(cmd, shell=True, check=True)
+    print("❌ Bad image applied! paymentservice will now fail deployments.")
+
+if __name__ == "__main__":
+    inject_bad_release()
+
+=== FILE: .\chaos\2_oom_kill.py ===
+
+import subprocess
+
+def inject_oom_limit():
+    print("🔥 [CHAOS] Injecting severe memory limit on cartservice...")
+    # Standard syntax: --requests=memory=10Mi
+    cmd = 'kubectl set resources deployment/cartservice -c server --limits=memory=10Mi --requests=memory=10Mi'
+    subprocess.run(cmd, shell=True, check=True)
+    print("💥 Memory limit patched! cartservice will now OOMKill.")
+
+if __name__ == "__main__":
+    inject_oom_limit()
+
+=== FILE: .\chaos\3_db_exhaustion.py ===
+
+import subprocess
+import json
+
+def inject_db_crash():
+    print("🔥 [CHAOS] Patching redis-cart with failing command...")
+    
+    # Safely format JSON patch array
+    patch_payload = json.dumps([
+        {
+            "op": "add",
+            "path": "/spec/template/spec/containers/0/command",
+            "value": ["sh", "-c", "exit 1"]
+        }
+    ])
+    
+    # Pass as a clean list without shell=True to prevent PowerShell quote stripping
+    cmd = [
+        "kubectl", "patch", "deployment", "redis-cart",
+        "--type=json",
+        "-p", patch_payload
+    ]
+    
+    subprocess.run(cmd, check=True)
+    print("🔌 redis-cart is now crashing repeatedly in a restart loop!")
+
+if __name__ == "__main__":
+    inject_db_crash()
+
+=== FILE: .\chaos\4_cascading_delay.py ===
+
+import subprocess
+
+def inject_cascading_delay():
+    print("🔥 [CHAOS] Injecting CPU starvation/delay into shippingservice...")
+    # Standard syntax: --requests=cpu=1m
+    cmd = 'kubectl set resources deployment/shippingservice -c server --limits=cpu=1m --requests=cpu=1m'
+    subprocess.run(cmd, shell=True, check=True)
+    print("🐢 shippingservice is CPU starved! Inbound requests will now experience severe delays.")
+
+if __name__ == "__main__":
+    inject_cascading_delay()

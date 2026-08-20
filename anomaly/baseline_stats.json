@@ -1,0 +1,134 @@
+{
+  "frontend_cpu": {
+    "mean": 0.002251359617416684,
+    "std": 0.0039891067911081695
+  },
+  "frontend_memory": {
+    "mean": 9021108.580912864,
+    "std": 4762895.926303799
+  },
+  "frontend_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "cartservice_cpu": {
+    "mean": 0.004173408780814839,
+    "std": 0.005393858719497774
+  },
+  "cartservice_memory": {
+    "mean": 54034398.008298755,
+    "std": 25450424.733806238
+  },
+  "cartservice_restarts": {
+    "mean": 0.7261410788381742,
+    "std": 0.9262948396778594
+  },
+  "paymentservice_cpu": {
+    "mean": 0.0008931986181344016,
+    "std": 0.001845130313490364
+  },
+  "paymentservice_memory": {
+    "mean": 28108060.680497926,
+    "std": 14151088.311238658
+  },
+  "paymentservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "checkoutservice_cpu": {
+    "mean": 0.00034463132809386455,
+    "std": 0.0003027569389461674
+  },
+  "checkoutservice_memory": {
+    "mean": 6774512.066390041,
+    "std": 3634457.0379195837
+  },
+  "checkoutservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "shippingservice_cpu": {
+    "mean": 0.000399332146193893,
+    "std": 0.0002632660329431864
+  },
+  "shippingservice_memory": {
+    "mean": 6293699.452282158,
+    "std": 3055773.504587586
+  },
+  "shippingservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "emailservice_cpu": {
+    "mean": 0.0024083603472174987,
+    "std": 0.003772369113589419
+  },
+  "emailservice_memory": {
+    "mean": 38990112.92946058,
+    "std": 18574300.436116513
+  },
+  "emailservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "productcatalogservice_cpu": {
+    "mean": 0.0012032510761201148,
+    "std": 0.0019289878185536238
+  },
+  "productcatalogservice_memory": {
+    "mean": 10166339.983402489,
+    "std": 5289278.728544129
+  },
+  "productcatalogservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "recommendationservice_cpu": {
+    "mean": 0.002939950050890395,
+    "std": 0.0036361787082997187
+  },
+  "recommendationservice_memory": {
+    "mean": 34472734.80497925,
+    "std": 16628184.150405478
+  },
+  "recommendationservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "adservice_cpu": {
+    "mean": 0.003190778340802623,
+    "std": 0.005329112325782405
+  },
+  "adservice_memory": {
+    "mean": 89678469.84232365,
+    "std": 42961402.35884751
+  },
+  "adservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "currencyservice_cpu": {
+    "mean": 0.0023488387665804395,
+    "std": 0.0034190759847945182
+  },
+  "currencyservice_memory": {
+    "mean": 34638614.30705394,
+    "std": 17928655.401148174
+  },
+  "currencyservice_restarts": {
+    "mean": 0.0,
+    "std": 1e-06
+  },
+  "redis-cart_cpu": {
+    "mean": 0.0013248358750632462,
+    "std": 0.0007276455081872429
+  },
+  "redis-cart_memory": {
+    "mean": 9025935.402489627,
+    "std": 4766322.723935358
+  },
+  "redis-cart_restarts": {
+    "mean": 1.045643153526971,
+    "std": 0.9671649404987828
+  }
+}
